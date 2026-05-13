@@ -1,0 +1,27 @@
+# Package manifest — amalgame-io-filewatcher
+#
+# Pure-Amalgame file-watch facade — single-file mtime polling with
+# Exists / Changed / GetPath. Cross-platform via stat() on POSIX
+# and _stat64 on Windows. Originally bundled in amc's
+# src/stdlib/io_filewatcher.am; extracted into this external
+# package as part of the framework split.
+#
+# Installation:
+#
+#   amc package add io-filewatcher                  # via curated index
+#   amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.1.0
+
+[package]
+name              = "amalgame-io-filewatcher"
+version           = "0.1.0"
+license           = "Apache-2.0"
+description       = "Pure-Amalgame file-watch facade: single-file mtime polling."
+authors           = ["Bastien Mouget"]
+required-amalgame = ">=0.7.7"
+schema-version    = 1
+
+[stdlib]
+class     = "FileWatcher"
+header    = "facade-stub.h"
+namespace = "Amalgame.IO.FileWatcher"
+facade    = "facade.am"
