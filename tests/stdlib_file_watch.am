@@ -80,7 +80,7 @@ public class Program {
         // Absent → present yields one Created event.
         File.WriteAll(v2Path, "alpha")
         let pe1 = pw.Poll()
-        if (pe1.Count() == 1 && pe1.Get(0).KindOf() == WatchEventKind.Created()) {
+        if (pe1.Count() == 1 && pe1.Get(0).KindOf() == WatchEventKind.Created) {
             Console.WriteLine("[PASS] Poll emits Created on appearance")
         } else {
             Console.WriteLine("[FAIL] Poll emits Created on appearance")
@@ -95,7 +95,7 @@ public class Program {
         // Present → absent yields Deleted.
         let _rm3: bool = File.Delete(v2Path)
         let pe3 = pw.Poll()
-        if (pe3.Count() == 1 && pe3.Get(0).KindOf() == WatchEventKind.Deleted()) {
+        if (pe3.Count() == 1 && pe3.Get(0).KindOf() == WatchEventKind.Deleted) {
             Console.WriteLine("[PASS] Poll emits Deleted on disappearance")
         } else {
             Console.WriteLine("[FAIL] Poll emits Deleted on disappearance")
@@ -132,7 +132,7 @@ public class Program {
         }
         var allCreated: bool = true
         for ev in dwe1 {
-            if (ev.KindOf() != WatchEventKind.Created()) { allCreated = false }
+            if (ev.KindOf() != WatchEventKind.Created) { allCreated = false }
         }
         if (allCreated) {
             Console.WriteLine("[PASS] DirectoryWatcher all events are Created")
@@ -142,7 +142,7 @@ public class Program {
         // Delete one.
         let _del1 = File.Delete(dwDir + "/a.txt")
         let dwe2 = dw.Poll()
-        if (dwe2.Count() == 1 && dwe2.Get(0).KindOf() == WatchEventKind.Deleted()) {
+        if (dwe2.Count() == 1 && dwe2.Get(0).KindOf() == WatchEventKind.Deleted) {
             Console.WriteLine("[PASS] DirectoryWatcher Deleted event")
         } else {
             Console.WriteLine("[FAIL] DirectoryWatcher Deleted event")

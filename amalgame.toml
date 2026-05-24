@@ -14,9 +14,12 @@
 #
 #   WatchEvent                     — { Kind, Path, RenamedTo, TimestampMs }
 #   WatchEventKind                 — Created / Modified / Deleted / Renamed
-#                                    (static int methods; polling backend
-#                                    never emits Renamed — reserved for
-#                                    the v0.3 native backends)
+#                                    (real enum since v0.3.0 — was a
+#                                    class with static int methods in
+#                                    v0.2.x as an amc-cgen workaround;
+#                                    polling backend never emits
+#                                    Renamed — reserved for the v0.4
+#                                    native backends)
 #
 # Cross-platform via stat() / _stat64 + opendir/readdir on POSIX
 # and FindFirstFileA/FindNextFileA on Windows. Originally bundled
@@ -30,19 +33,19 @@
 # Installation:
 #
 #   amc package add io-filewatcher                  # via curated index
-#   amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.2.0
+#   amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.3.0
 
 [package]
 name              = "amalgame-io-filewatcher"
-version           = "0.2.0"
+version           = "0.3.0"
 license           = "Apache-2.0"
 description       = "File-watch facade: FileWatcher + DirectoryWatcher with typed WatchEvent, mtime polling."
 authors           = ["Bastien Mouget"]
-required-amalgame = ">=0.8.29"
+required-amalgame = ">=0.8.47"
 schema-version    = 1
 
 [stdlib]
-classes   = ["FileWatcher", "DirectoryWatcher", "WatchEvent", "WatchEventKind", "DirSnapshot"]
+classes   = ["FileWatcher", "DirectoryWatcher", "WatchEvent", "DirSnapshot"]
 header    = "facade-stub.h"
 namespace = "Amalgame.IO.FileWatcher"
 facade    = "facade.am"
