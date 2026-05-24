@@ -15,12 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # v0.2.0+ requires amc 0.8.29+ for the `classes = [...]`
-        # multi-class manifest form (WatchEventKind, WatchEvent,
-        # DirectoryWatcher, DirSnapshot ride alongside FileWatcher).
-        # Pinned to the latest release; bump the tag here when
-        # depending on a newer amc feature.
-        amc-tag: [v0.8.45]
+        # v0.3.0+ requires amc 0.8.47+ for cross-package enum variant
+        # dispatch (WatchEventKind is now a real enum; pre-0.8.47 the
+        # consumer's `WatchEventKind.Created` mis-mangled to the
+        # consumer's namespace at link time). Pinned to the latest
+        # release; bump the tag here when depending on a newer amc
+        # feature.
+        amc-tag: [v0.8.47]
     steps:
       - name: Checkout package
         uses: actions/checkout@v4
