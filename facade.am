@@ -56,6 +56,12 @@ namespace Amalgame.IO.FileWatcher
         #include <dirent.h>
         #include <time.h>
     #endif
+    #ifdef __linux__
+        #include <sys/inotify.h>
+        #include <unistd.h>
+        #include <fcntl.h>
+        #include <errno.h>
+    #endif
 
     /* Return current mtime, or -1 if the file is absent /
      * unreadable. Doesn't follow symlinks differently from
@@ -113,6 +119,227 @@ namespace Amalgame.IO.FileWatcher
         AmalgameList_add(paths_out, (void*) copy);
         intptr_t mt = (intptr_t) st.st_mtime;
         AmalgameList_add(mtimes_out, (void*) mt);
+    }
+
+    /* ── inotify backend (Linux only) ──────────────────
+     *
+     * Wrappers around inotify_init1 / inotify_add_watch /
+     * inotify_rm_watch / read(2). The AM side owns the wd↔path
+     * mapping (two parallel lists); these helpers read the kernel
+     * queue and translate raw `struct inotify_event` records into
+     * the same (path, kind, is_dir) triple the polling backend
+     * uses. On non-Linux every helper returns -1 / no-op so the
+     * AM side transparently falls back to mtime polling. */
+
+    /* Returns the inotify fd, or -1 on failure / non-Linux. */
+    static int amalgame_fw_inotify_init(void) {
+#ifdef __linux__
+        return inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+#else
+        return -1;
+#endif
+    }
+
+    /* Add a watch. `is_dir` decides the event mask:
+     *   - file: IN_MODIFY | IN_DELETE_SELF | IN_MOVE_SELF
+     *   - dir : IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM |
+     *           IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF
+     * Returns wd >= 0 or -1. */
+    static int amalgame_fw_inotify_add(int fd, code_string path, int is_dir) {
+#ifdef __linux__
+        if (fd < 0 || !path) return -1;
+        uint32_t mask;
+        if (is_dir) {
+            mask = IN_CREATE | IN_DELETE | IN_MODIFY |
+                   IN_MOVED_FROM | IN_MOVED_TO |
+                   IN_DELETE_SELF | IN_MOVE_SELF;
+        } else {
+            mask = IN_MODIFY | IN_DELETE_SELF | IN_MOVE_SELF;
+        }
+        return inotify_add_watch(fd, path, mask);
+#else
+        (void) fd; (void) path; (void) is_dir;
+        return -1;
+#endif
+    }
+
+    /* Close the inotify fd (no-op on non-Linux). */
+    static void amalgame_fw_inotify_close(int fd) {
+#ifdef __linux__
+        if (fd >= 0) close(fd);
+#else
+        (void) fd;
+#endif
+    }
+
+    /* Drain the inotify queue. Reads one or more `struct
+     * inotify_event` records via read(2) (non-blocking — stops on
+     * EAGAIN/EWOULDBLOCK). For each event:
+     *   1. Look up wd in wd_list (parallel with parent_list) to
+     *      find the parent directory path.
+     *   2. Build the full event path = parent + "/" + event.name
+     *      (or just parent if name is empty — IN_DELETE_SELF /
+     *      IN_MOVE_SELF on the watched node itself).
+     *   3. Map the mask to a kind code (0=Created, 1=Modified,
+     *      2=Deleted, 3=Renamed). Renamed is never emitted by this
+     *      MVP (IN_MOVED_FROM/TO surface as Deleted+Created); the
+     *      cookie-pairing pass is reserved for v0.5.
+     *   4. Append (path, kind, is_dir, wd) to the four out-lists.
+     *      The caller uses `is_dir` to know whether to add a new
+     *      watch on a Created-dir event (recursive mode). The
+     *      `wd` is included so the caller can drop wd→path
+     *      entries on IN_DELETE_SELF / IN_IGNORED. */
+    static void amalgame_fw_inotify_drain(int fd,
+                                          AmalgameList* wd_list,
+                                          AmalgameList* parent_list,
+                                          AmalgameList* events_paths,
+                                          AmalgameList* events_kinds,
+                                          AmalgameList* events_is_dir,
+                                          AmalgameList* events_wds) {
+#ifdef __linux__
+        if (fd < 0) return;
+        char buf[8192];
+        for (;;) {
+            ssize_t n = read(fd, buf, sizeof(buf));
+            if (n <= 0) {
+                /* EAGAIN/EWOULDBLOCK on the non-blocking fd =
+                 * queue empty. Any other error: stop gracefully. */
+                break;
+            }
+            ssize_t off = 0;
+            while (off < n) {
+                struct inotify_event* ev = (struct inotify_event*)(buf + off);
+                /* Find the parent path via wd lookup. AmalgameList
+                 * stores int values as (void*)(intptr_t) — unbox
+                 * accordingly. */
+                const char* parent = NULL;
+                int wd_count = (int) AmalgameList_size(wd_list);
+                for (int i = 0; i < wd_count; i++) {
+                    intptr_t wd_i = (intptr_t) wd_list->data[i];
+                    if ((int) wd_i == ev->wd) {
+                        parent = (const char*) parent_list->data[i];
+                        break;
+                    }
+                }
+                if (parent != NULL) {
+                    int parent_len = (int) strlen(parent);
+                    int has_name = (ev->len > 0 && ev->name[0] != '\0');
+                    int name_len = has_name ? (int) strlen(ev->name) : 0;
+                    int sep = (parent_len > 0 && parent[parent_len - 1] == '/') ? 0 : 1;
+                    int total = parent_len + (has_name ? sep + name_len : 0);
+                    char* full = (char*) GC_MALLOC((size_t) total + 1);
+                    memcpy(full, parent, (size_t) parent_len);
+                    if (has_name) {
+                        if (sep) full[parent_len] = '/';
+                        memcpy(full + parent_len + sep, ev->name, (size_t) name_len);
+                    }
+                    full[total] = '\0';
+
+                    int emit = 1;
+                    int kind = 1; /* Modified */
+                    if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
+                        kind = 0; /* Created */
+                    } else if (ev->mask & IN_MODIFY) {
+                        kind = 1; /* Modified */
+                    } else if (ev->mask & (IN_DELETE | IN_DELETE_SELF |
+                                           IN_MOVED_FROM | IN_MOVE_SELF)) {
+                        kind = 2; /* Deleted */
+                    } else if (ev->mask & IN_IGNORED) {
+                        /* Watch was implicitly removed (e.g. dir
+                         * containing it deleted). Surface as wd
+                         * removal — caller drops the entry. */
+                        emit = 0;
+                    } else {
+                        emit = 0;
+                    }
+                    if (emit) {
+                        int is_dir = (ev->mask & IN_ISDIR) ? 1 : 0;
+                        AmalgameList_add(events_paths, (void*) full);
+                        AmalgameList_add(events_kinds, (void*) (intptr_t) kind);
+                        AmalgameList_add(events_is_dir, (void*) (intptr_t) is_dir);
+                        AmalgameList_add(events_wds, (void*) (intptr_t) ev->wd);
+                    }
+                    /* Always notify caller when a watch is being
+                     * dropped, so it can clean its wd_list. */
+                    if (ev->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) {
+                        /* Sentinel: kind = -1 means "drop wd". */
+                        AmalgameList_add(events_paths, (void*) full);
+                        AmalgameList_add(events_kinds, (void*) (intptr_t) -1);
+                        AmalgameList_add(events_is_dir, (void*) (intptr_t) 0);
+                        AmalgameList_add(events_wds, (void*) (intptr_t) ev->wd);
+                    }
+                }
+                off += sizeof(struct inotify_event) + ev->len;
+            }
+        }
+#else
+        (void) fd; (void) wd_list; (void) parent_list;
+        (void) events_paths; (void) events_kinds;
+        (void) events_is_dir; (void) events_wds;
+#endif
+    }
+
+    /* Collect every subdirectory under `dir` (recursive — DFS),
+     * including `dir` itself. Output is one parallel list of
+     * absolute directory paths. Used by the inotify backend to
+     * add a watch per subtree directory at init (and after each
+     * IN_CREATE | IN_ISDIR event). */
+    static void amalgame_fw_walk_dirs(const char* dir,
+                                      AmalgameList* dirs_out) {
+        if (!dir) return;
+        /* Record `dir` itself first. */
+        size_t dlen0 = strlen(dir);
+        char* copy0 = (char*) GC_MALLOC(dlen0 + 1);
+        memcpy(copy0, dir, dlen0 + 1);
+        AmalgameList_add(dirs_out, (void*) copy0);
+#ifdef _WIN32
+        char pattern[MAX_PATH];
+        int dlen = (int) strlen(dir);
+        if (dlen + 3 >= (int) sizeof(pattern)) return;
+        memcpy(pattern, dir, dlen);
+        if (dlen > 0 && dir[dlen - 1] != '\\' && dir[dlen - 1] != '/') {
+            pattern[dlen++] = '\\';
+        }
+        pattern[dlen++] = '*';
+        pattern[dlen]   = '\0';
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (strcmp(fd.cFileName, ".") == 0) continue;
+            if (strcmp(fd.cFileName, "..") == 0) continue;
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+            char full[MAX_PATH];
+            int flen = dlen - 1;
+            int nlen = (int) strlen(fd.cFileName);
+            if (flen + nlen >= (int) sizeof(full)) continue;
+            memcpy(full, pattern, flen);
+            memcpy(full + flen, fd.cFileName, nlen + 1);
+            amalgame_fw_walk_dirs(full, dirs_out);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+#else
+        DIR* dh = opendir(dir);
+        if (!dh) return;
+        struct dirent* e;
+        while ((e = readdir(dh)) != NULL) {
+            if (strcmp(e->d_name, ".")  == 0) continue;
+            if (strcmp(e->d_name, "..") == 0) continue;
+            int dlen = (int) strlen(dir);
+            int nlen = (int) strlen(e->d_name);
+            int sep  = (dlen > 0 && dir[dlen - 1] == '/') ? 0 : 1;
+            char* full = (char*) malloc((size_t) dlen + (size_t) sep + (size_t) nlen + 1);
+            if (!full) continue;
+            memcpy(full, dir, (size_t) dlen);
+            if (sep) full[dlen] = '/';
+            memcpy(full + dlen + sep, e->d_name, (size_t) nlen + 1);
+            if (amalgame_fw_is_dir(full)) {
+                amalgame_fw_walk_dirs(full, dirs_out);
+            }
+            free(full);
+        }
+        closedir(dh);
+#endif
     }
 
     /* Walk `dir`. If `recursive` is non-zero, descends into
@@ -230,15 +457,38 @@ public class WatchEvent {
 }
 
 // ── FileWatcher (single-file) ─────────────────────────
+//
+// Backend selection (v0.4):
+//   1. On Linux, try `inotify_init1`. On success, install an
+//      `IN_MODIFY | IN_DELETE_SELF | IN_MOVE_SELF` watch on the
+//      file. `Poll()` drains the inotify queue.
+//   2. On non-Linux OR if inotify_init fails (kernel limit hit,
+//      unprivileged container), fall back to mtime polling — the
+//      v0.3 behaviour, bit-for-bit identical.
+//
+// The v1 `Changed()` / `Exists()` / `GetPath()` surface keeps
+// using mtime checks regardless of backend, so it stays cheap
+// (one `stat` per call) and works the same way both modes.
+// `BackendName()` is exposed for tests and diagnostics.
 public class FileWatcher {
     private path:      string
     private lastMtime: int
+    private inotifyFd: int   // -1 = polling fallback
+    private inotifyWd: int   // -1 = no current watch (file absent / kernel dropped it)
 
     public FileWatcher(path: string) {
         this.path = path
         var m: int = -1
         @c { m = (i64) amalgame_fw_mtime(path); }
         this.lastMtime = m
+        var fd: int = -1
+        @c { fd = (i64) amalgame_fw_inotify_init(); }
+        var wd: int = -1
+        if (fd >= 0 && m >= 0) {
+            @c { wd = (i64) amalgame_fw_inotify_add(fd, self->path, 0); }
+        }
+        this.inotifyFd = fd
+        this.inotifyWd = wd
     }
 
     public string GetPath() {
@@ -251,10 +501,18 @@ public class FileWatcher {
         return m >= 0
     }
 
+    // "inotify" when the kernel queue is wired up; "polling"
+    // otherwise. Useful in tests + diagnostics — user code rarely
+    // needs to care, the events look the same either way.
+    public string BackendName() {
+        if (this.inotifyFd >= 0) { return "inotify" }
+        return "polling"
+    }
+
     // v1 surface — true iff mtime advanced (or appearance /
-    // disappearance flipped) since the last call. Side-effects
-    // the internal snapshot just like `Poll()` does, so the two
-    // can be mixed but the user shouldn't normally do both.
+    // disappearance flipped) since the last call. Always
+    // mtime-based regardless of backend so the cost stays
+    // predictable.
     public bool Changed() {
         var cur: int = -1
         @c { cur = (i64) amalgame_fw_mtime(self->path); }
@@ -265,12 +523,17 @@ public class FileWatcher {
         return false
     }
 
-    // v2 surface — returns 0 or 1 `WatchEvent` per call, with
-    // `Kind` derived from the (old, new) mtime pair:
-    //   (-1, >=0) → Created
-    //   (>=0, -1) → Deleted
-    //   (a, b) a!=b → Modified
+    // v2 surface — returns 0+ `WatchEvent`s since the previous
+    // call. Backend-dispatched: inotify drains the kernel queue,
+    // polling diffs the mtime against the snapshot.
     public List<WatchEvent> Poll() {
+        if (this.inotifyFd >= 0) {
+            return this.PollInotify()
+        }
+        return this.PollMtime()
+    }
+
+    private List<WatchEvent> PollMtime() {
         let events: List<WatchEvent> = new List<WatchEvent>()
         var cur: int = -1
         @c { cur = (i64) amalgame_fw_mtime(self->path); }
@@ -288,32 +551,117 @@ public class FileWatcher {
         }
         return events
     }
+
+    private List<WatchEvent> PollInotify() {
+        let events: List<WatchEvent> = new List<WatchEvent>()
+        let wdList:     List<int>    = new List<int>()
+        let parentList: List<string> = new List<string>()
+        if (this.inotifyWd >= 0) {
+            wdList.Add(this.inotifyWd)
+            parentList.Add(this.path)
+        }
+        let outPaths: List<string> = new List<string>()
+        let outKinds: List<int>    = new List<int>()
+        let outIsDir: List<int>    = new List<int>()
+        let outWds:   List<int>    = new List<int>()
+        @c { amalgame_fw_inotify_drain(self->inotifyFd, wdList, parentList,
+                                       outPaths, outKinds, outIsDir, outWds); }
+        var nowMs: int = 0
+        @c { nowMs = (i64) amalgame_fw_now_ms(); }
+        var watchGone: bool = false
+        let n: int = outPaths.Count()
+        for i in 0..n {
+            let k: int = outKinds.Get(i)
+            if (k == -1) {
+                // Sentinel: kernel dropped the watch
+                // (IN_DELETE_SELF / IN_MOVE_SELF / IN_IGNORED).
+                // We'll try to re-add below; don't emit anything
+                // on the sentinel itself.
+                watchGone = true
+                continue
+            }
+            var kind: WatchEventKind = WatchEventKind.Modified
+            if (k == 0)      { kind = WatchEventKind.Created }
+            else if (k == 2) { kind = WatchEventKind.Deleted }
+            events.Add(new WatchEvent(kind, this.path, nowMs))
+        }
+        if (watchGone) {
+            this.inotifyWd = -1
+        }
+        // Re-add a watch if we don't currently have one. Two
+        // entry conditions:
+        //   A. Never had a watch (file absent at construction,
+        //      now exists) — emit Created if `lastMtime < 0`.
+        //   B. Watch was dropped by the kernel (`watchGone`) and
+        //      a new file is now at the same path — the OLD
+        //      inode is gone, the NEW one needs a Created event
+        //      regardless of `lastMtime`, because that's what
+        //      the user observes (atomic rename = brand-new file).
+        if (this.inotifyWd < 0) {
+            var m: int = -1
+            @c { m = (i64) amalgame_fw_mtime(self->path); }
+            if (m >= 0) {
+                var wd: int = -1
+                @c { wd = (i64) amalgame_fw_inotify_add(self->inotifyFd, self->path, 0); }
+                this.inotifyWd = wd
+                if (this.lastMtime < 0 || watchGone) {
+                    events.Add(new WatchEvent(WatchEventKind.Created, this.path, nowMs))
+                }
+                this.lastMtime = m
+            } else if (this.lastMtime >= 0) {
+                this.lastMtime = -1
+            }
+        }
+        return events
+    }
 }
 
 // ── DirectoryWatcher ──────────────────────────────────
-// Walks `path` on every `Poll()`. Subdirectories are descended
-// when `recursive` is true. Hidden files / `.git` etc. are NOT
-// pre-filtered — the caller decides what to ignore.
+//
+// Backend selection (v0.4):
+//   1. On Linux, try `inotify_init1`. On success, walk the dir
+//      (recursive if asked) and install a directory-mask watch
+//      on every subtree directory found. `Poll()` drains the
+//      inotify queue; on `IN_CREATE | IN_ISDIR`, recursively
+//      adds watches for the new subtree (and emits Created
+//      events for any files already inside, in case the
+//      create-then-fill happens between watches).
+//   2. On non-Linux or inotify_init failure, fall back to the
+//      mtime-poll behaviour (walk dir on every Poll, diff
+//      against snapshot via two Map<string,int> lookups).
+//
+// `Count()` always reflects the initial snapshot — useful for
+// "dir was empty at construction" assertions in tests.
 public class DirectoryWatcher {
-    private path:      string
-    private recursive: bool
-    private paths:     List<string>
-    private mtimes:    List<int>
+    private path:       string
+    private recursive:  bool
+    // Polling-mode state (also kept warm under inotify for the
+    // Count() accessor + a clean polling fallback if a future
+    // hybrid mode needs it).
+    private paths:      List<string>
+    private mtimes:     List<int>
+    // inotify-mode state.
+    private inotifyFd:  int            // -1 = polling fallback
+    private wds:        List<int>      // parallel with watchDirs
+    private watchDirs:  List<string>   // parent path of each wd
 
     public DirectoryWatcher(path: string, recursive: bool) {
         this.path      = path
         this.recursive = recursive
         this.paths     = new List<string>()
         this.mtimes    = new List<int>()
-        let rec: int = 0
-        if (recursive) {
-            let snapshot = DirectoryWatcher.Snapshot(path, true)
-            this.paths  = snapshot.PathsOf()
-            this.mtimes = snapshot.MtimesOf()
-        } else {
-            let snapshot = DirectoryWatcher.Snapshot(path, false)
-            this.paths  = snapshot.PathsOf()
-            this.mtimes = snapshot.MtimesOf()
+        this.wds       = new List<int>()
+        this.watchDirs = new List<string>()
+        let snapshot = DirectoryWatcher.Snapshot(path, recursive)
+        this.paths  = snapshot.PathsOf()
+        this.mtimes = snapshot.MtimesOf()
+        // Try inotify; if init fails we keep `inotifyFd = -1` and
+        // the polling path remains hot.
+        var fd: int = -1
+        @c { fd = (i64) amalgame_fw_inotify_init(); }
+        this.inotifyFd = fd
+        if (fd >= 0) {
+            this.AddSubtreeWatches(path)
         }
     }
 
@@ -321,10 +669,127 @@ public class DirectoryWatcher {
     public bool   IsRecursive()  { return this.recursive }
     public int    Count()        { return this.paths.Count() }
 
+    // "inotify" when the kernel queue is wired up, "polling"
+    // otherwise. Mirrors `FileWatcher.BackendName()`.
+    public string BackendName() {
+        if (this.inotifyFd >= 0) { return "inotify" }
+        return "polling"
+    }
+
     // Returns every state transition since the previous Poll()
     // (or since construction for the first call). Empty list when
     // nothing changed.
     public List<WatchEvent> Poll() {
+        if (this.inotifyFd >= 0) {
+            return this.PollInotify()
+        }
+        return this.PollMtime()
+    }
+
+    // Add the root + every recursive subdir to the inotify watch
+    // set. Skips entries we can't add (paths that disappear in
+    // the race window between walk and add). Idempotent: same
+    // dir won't be watched twice because the kernel returns the
+    // same wd for the same inode (we append it again, which is
+    // a small leak in our parallel-list state but harmless).
+    private void AddSubtreeWatches(dir: string) {
+        let dirs: List<string> = new List<string>()
+        if (this.recursive) {
+            @c { amalgame_fw_walk_dirs(dir, dirs); }
+        } else {
+            dirs.Add(dir)
+        }
+        let n: int = dirs.Count()
+        for i in 0..n {
+            let d: string = dirs.Get(i)
+            var wd: int = -1
+            @c { wd = (i64) amalgame_fw_inotify_add(self->inotifyFd, d, 1); }
+            if (wd >= 0) {
+                this.wds.Add(wd)
+                this.watchDirs.Add(d)
+            }
+        }
+    }
+
+    private void DropWatch(wd: int) {
+        let n: int = this.wds.Count()
+        var idx: int = -1
+        for i in 0..n {
+            if (this.wds.Get(i) == wd) { idx = i }
+        }
+        if (idx >= 0) {
+            this.wds.RemoveAt(idx)
+            this.watchDirs.RemoveAt(idx)
+        }
+    }
+
+    private List<WatchEvent> PollInotify() {
+        let events: List<WatchEvent> = new List<WatchEvent>()
+        let outPaths: List<string> = new List<string>()
+        let outKinds: List<int>    = new List<int>()
+        let outIsDir: List<int>    = new List<int>()
+        let outWds:   List<int>    = new List<int>()
+        @c { amalgame_fw_inotify_drain(self->inotifyFd, self->wds, self->watchDirs,
+                                       outPaths, outKinds, outIsDir, outWds); }
+        var nowMs: int = 0
+        @c { nowMs = (i64) amalgame_fw_now_ms(); }
+        let n: int = outPaths.Count()
+
+        // Pass 1 — collect "Created" paths into a set. Used in
+        // pass 2 to suppress the Modified follow-up that
+        // `WriteAll` (open(O_CREAT) + write) naturally triggers
+        // on a directory watch with `IN_MODIFY` in the mask.
+        // Without the dedupe, a single `WriteAll` produces two
+        // events (Created + Modified) and breaks the "one event
+        // per file appearance" intuition that matches the
+        // polling backend.
+        let createdSet: Map<string,int> = new Map<string,int>()
+        for i in 0..n {
+            let k: int = outKinds.Get(i)
+            let p: string = outPaths.Get(i)
+            if (k == 0) {
+                createdSet.Set(p, 1)
+            }
+        }
+        // Pass 2 — emit events + handle sentinels + grow watches
+        // on new-subdir creation (recursive mode).
+        for i in 0..n {
+            let k: int = outKinds.Get(i)
+            let p: string = outPaths.Get(i)
+            let isDir: bool = (outIsDir.Get(i) == 1)
+            let wd: int = outWds.Get(i)
+            if (k == -1) {
+                this.DropWatch(wd)
+                continue
+            }
+            // Dedupe: skip Modified if a Created event for the
+            // same path also rode in the batch.
+            if (k == 1 && createdSet.Get(p) == 1) {
+                continue
+            }
+            var kind: WatchEventKind = WatchEventKind.Modified
+            if (k == 0)      { kind = WatchEventKind.Created }
+            else if (k == 2) { kind = WatchEventKind.Deleted }
+            events.Add(new WatchEvent(kind, p, nowMs))
+            // A new subdir appeared inside a recursive watch tree
+            // → add watches on it AND emit synthetic Created
+            // events for any files already inside (race window
+            // between `mkdir` and our `inotify_add_watch`).
+            if (this.recursive && isDir && k == 0) {
+                this.AddSubtreeWatches(p)
+                let files:  List<string> = new List<string>()
+                let mtimes: List<int>    = new List<int>()
+                @c { amalgame_fw_walk(p, 1, files, mtimes); }
+                let fn: int = files.Count()
+                for fi in 0..fn {
+                    events.Add(new WatchEvent(WatchEventKind.Created, files.Get(fi), nowMs))
+                }
+            }
+        }
+        return events
+    }
+
+    private List<WatchEvent> PollMtime() {
         let snapshot = DirectoryWatcher.Snapshot(this.path, this.recursive)
         let newPaths:  List<string> = snapshot.PathsOf()
         let newMtimes: List<int>    = snapshot.MtimesOf()
@@ -348,7 +813,6 @@ public class DirectoryWatcher {
         var nowMs: int = 0
         @c { nowMs = (i64) amalgame_fw_now_ms(); }
 
-        // Pass 1: new vs old → Created / Modified
         for j in 0..newN {
             let p: string = newPaths.Get(j)
             let nm: int   = newMtimes.Get(j)
@@ -362,7 +826,6 @@ public class DirectoryWatcher {
                 }
             }
         }
-        // Pass 2: old vs new → Deleted
         for i in 0..oldN {
             let p: string = this.paths.Get(i)
             if (newIdx.Get(p) == 0) {
@@ -379,7 +842,6 @@ public class DirectoryWatcher {
     private static DirSnapshot Snapshot(dir: string, recursive: bool) {
         let paths:  List<string> = new List<string>()
         let mtimes: List<int>    = new List<int>()
-        let rec: int = 0
         if (recursive) {
             @c { amalgame_fw_walk(dir, 1, paths, mtimes); }
         } else {

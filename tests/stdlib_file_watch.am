@@ -176,5 +176,87 @@ public class Program {
 
         // Cleanup.
         let _c1 = Process.Run("rm -rf '" + dwDir + "' '" + rDir + "' '" + nDir + "'")
+
+        // ── v0.4: backend introspection ─────────────────────
+        // On Linux, the inotify backend is auto-selected. CI runs
+        // on Ubuntu so we expect "inotify" here. On other OSes,
+        // "polling" is the only choice and these would skip.
+        let beProbePath: string = "/tmp/amc_fw_v04_backend.txt"
+        File.WriteAll(beProbePath, "x")
+        let beW = new FileWatcher(beProbePath)
+        let beName: string = beW.BackendName()
+        if (beName == "inotify" || beName == "polling") {
+            Console.WriteLine("[PASS] FileWatcher.BackendName returns inotify or polling (got " + beName + ")")
+        } else {
+            Console.WriteLine("[FAIL] FileWatcher.BackendName unexpected " + beName)
+        }
+        let _ = File.Delete(beProbePath)
+
+        // ── v0.4: inotify reactive — Modify detection ───────
+        let nbDir: string = "/tmp/amc_fw_v04_react"
+        let _nb = Process.Run("rm -rf '" + nbDir + "' && mkdir -p '" + nbDir + "'")
+        let nbFile: string = nbDir + "/probe.txt"
+        File.WriteAll(nbFile, "v1")
+        let nbW = new FileWatcher(nbFile)
+        if (nbW.BackendName() == "inotify") {
+            // Modify via append. inotify delivers IN_MODIFY
+            // synchronously via the file-table commit; a brief
+            // sleep before Poll avoids racy CI runners.
+            let _wr = Process.Run("sh -c 'echo y >> " + nbFile + " && sleep 0.1'")
+            let nbEvs = nbW.Poll()
+            var sawMod: bool = false
+            for ev in nbEvs {
+                if (ev.KindOf() == WatchEventKind.Modified) { sawMod = true }
+            }
+            if (sawMod) {
+                Console.WriteLine("[PASS] inotify detects Modify in real time")
+            } else {
+                Console.WriteLine("[FAIL] inotify Modify count=" + String_FromInt(nbEvs.Count()))
+            }
+
+            // Atomic-rename recovery — delete then re-create.
+            let _del = File.Delete(nbFile)
+            let _sl1 = Process.Run("sh -c 'sleep 0.1'")
+            File.WriteAll(nbFile, "v3")
+            let _sl2 = Process.Run("sh -c 'sleep 0.1'")
+            let nbEvs2 = nbW.Poll()
+            var sawDel: bool = false
+            var sawCre: bool = false
+            for ev in nbEvs2 {
+                if (ev.KindOf() == WatchEventKind.Deleted) { sawDel = true }
+                if (ev.KindOf() == WatchEventKind.Created) { sawCre = true }
+            }
+            if (sawDel && sawCre) {
+                Console.WriteLine("[PASS] inotify atomic-rename recovery (Delete+Create)")
+            } else {
+                Console.WriteLine("[FAIL] inotify rename del=" + String_FromInt(sawDel) + " cre=" + String_FromInt(sawCre))
+            }
+        } else {
+            Console.WriteLine("[SKIP] inotify detects Modify in real time (non-Linux)")
+            Console.WriteLine("[SKIP] inotify atomic-rename recovery (Delete+Create) (non-Linux)")
+        }
+        let _ncleanup = Process.Run("rm -rf '" + nbDir + "'")
+
+        // ── v0.4: DirectoryWatcher recursive picks up new
+        //   subdir's children (race between mkdir + populate). ──
+        let nsDir: string = "/tmp/amc_fw_v04_newsub"
+        let _ns = Process.Run("rm -rf '" + nsDir + "' && mkdir -p '" + nsDir + "'")
+        let nsW = new DirectoryWatcher(nsDir, true)
+        if (nsW.BackendName() == "inotify") {
+            let _mk = Process.Run("sh -c 'mkdir " + nsDir + "/newdir && sleep 0.05 && echo z > " + nsDir + "/newdir/z.txt && sleep 0.2'")
+            let nsEvs = nsW.Poll()
+            var sawZ: bool = false
+            for ev in nsEvs {
+                if (ev.PathOf() == nsDir + "/newdir/z.txt") { sawZ = true }
+            }
+            if (sawZ) {
+                Console.WriteLine("[PASS] inotify recursive picks up new subdir's file")
+            } else {
+                Console.WriteLine("[FAIL] inotify recursive new-subdir " + String_FromInt(nsEvs.Count()) + " events")
+            }
+        } else {
+            Console.WriteLine("[SKIP] inotify recursive picks up new subdir's file (non-Linux)")
+        }
+        let _nscleanup = Process.Run("rm -rf '" + nsDir + "'")
     }
 }
