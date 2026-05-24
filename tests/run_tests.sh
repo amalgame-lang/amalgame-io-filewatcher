@@ -94,7 +94,7 @@ run_test() {
     if [ ! -f "$out_base.c" ]; then echo -e "${RED}FAIL${NC} (no .c)"; FAIL=$((FAIL + 1)); return; fi
     local gcc_log
     gcc_log=$(gcc -O2 -I"$AMC_RUNTIME" "$out_base.c" "$ARCHIVE" \
-        -lgc -lm -lcurl -lz -ldl -lpthread -o "$out_base" 2>&1)
+        -lgc -lm -lz -ldl -lpthread -o "$out_base" 2>&1)
     if [ ! -x "$out_base" ]; then
         echo -e "${RED}FAIL${NC} (link)"
         echo "$gcc_log" | head -5 | sed 's/^/    /'
@@ -112,7 +112,7 @@ run_test() {
     fi
 }
 
-echo "── Amalgame.IO.FileWatcher ────────────────"
+echo "── Amalgame.IO.FileWatcher v1 ─────────────"
 run_test "exists when present"          "[PASS] exists when present"
 run_test "getpath"                      "[PASS] getpath"
 run_test "no-change-on-init"            "[PASS] no-change-on-init"
@@ -120,6 +120,20 @@ run_test "detect-delete"                "[PASS] detect-delete"
 run_test "reset-after-read"             "[PASS] reset-after-read"
 run_test "exists when absent"           "[PASS] exists when absent"
 run_test "detect-recreate"              "[PASS] detect-recreate"
+
+echo ""
+echo "── Amalgame.IO.FileWatcher v2 ─────────────"
+run_test "Poll Created"                 "[PASS] Poll emits Created on appearance"
+run_test "Poll quiescent"               "[PASS] Poll quiescent"
+run_test "Poll Deleted"                 "[PASS] Poll emits Deleted on disappearance"
+run_test "WatchEvent.PathOf"            "[PASS] WatchEvent.PathOf"
+run_test "WatchEvent.TimestampMs"       "[PASS] WatchEvent.TimestampMs"
+run_test "DirectoryWatcher empty"       "[PASS] DirectoryWatcher empty snapshot"
+run_test "DirectoryWatcher 2 Created"   "[PASS] DirectoryWatcher detects 2 Created"
+run_test "DirectoryWatcher all Created" "[PASS] DirectoryWatcher all events are Created"
+run_test "DirectoryWatcher Deleted"     "[PASS] DirectoryWatcher Deleted event"
+run_test "DirectoryWatcher recursive"   "[PASS] DirectoryWatcher recursive sees nested"
+run_test "DirectoryWatcher non-recurs"  "[PASS] DirectoryWatcher non-recursive ignores subdirs"
 
 rm -f "$WORK_BUILD_DIR"
 echo ""
