@@ -1,27 +1,48 @@
 # Package manifest — amalgame-io-filewatcher
 #
-# Pure-Amalgame file-watch facade — single-file mtime polling with
-# Exists / Changed / GetPath. Cross-platform via stat() on POSIX
-# and _stat64 on Windows. Originally bundled in amc's
-# src/stdlib/io_filewatcher.am; extracted into this external
-# package as part of the framework split.
+# Pure-Amalgame file-watch facades on top of mtime polling:
+#
+#   FileWatcher(path)             — single-file mtime polling
+#     .Exists / .Changed / .GetPath           (v0.1, kept)
+#     .Poll() → List<WatchEvent>              (v0.2, typed events)
+#
+#   DirectoryWatcher(path, recursive) — walks a dir (optionally
+#     recursive) on every Poll() and diffs the file-set / mtime
+#     snapshot to emit Created / Modified / Deleted events.
+#     .Poll() → List<WatchEvent>
+#     .GetPath / .IsRecursive / .Count        (v0.2)
+#
+#   WatchEvent                     — { Kind, Path, RenamedTo, TimestampMs }
+#   WatchEventKind                 — Created / Modified / Deleted / Renamed
+#                                    (static int methods; polling backend
+#                                    never emits Renamed — reserved for
+#                                    the v0.3 native backends)
+#
+# Cross-platform via stat() / _stat64 + opendir/readdir on POSIX
+# and FindFirstFileA/FindNextFileA on Windows. Originally bundled
+# in amc's src/stdlib/io_filewatcher.am; extracted into this
+# external package as part of the framework split.
+#
+# Out of scope (v0.3): native backends — inotify on Linux,
+# FSEvents on macOS, ReadDirectoryChangesW on Windows. Polling
+# stays the portable fallback and the canonical test target.
 #
 # Installation:
 #
 #   amc package add io-filewatcher                  # via curated index
-#   amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.1.0
+#   amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.2.0
 
 [package]
 name              = "amalgame-io-filewatcher"
-version           = "0.1.0"
+version           = "0.2.0"
 license           = "Apache-2.0"
-description       = "Pure-Amalgame file-watch facade: single-file mtime polling."
+description       = "File-watch facade: FileWatcher + DirectoryWatcher with typed WatchEvent, mtime polling."
 authors           = ["Bastien Mouget"]
-required-amalgame = ">=0.7.7"
+required-amalgame = ">=0.8.29"
 schema-version    = 1
 
 [stdlib]
-class     = "FileWatcher"
+classes   = ["FileWatcher", "DirectoryWatcher", "WatchEvent", "WatchEventKind", "DirSnapshot"]
 header    = "facade-stub.h"
 namespace = "Amalgame.IO.FileWatcher"
 facade    = "facade.am"
