@@ -22,10 +22,10 @@ package as part of the framework split (post-v0.7.5).
 
 ```bash
 amc package add io-filewatcher                  # via the curated index
-amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.2.0
+amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.3.0
 ```
 
-Requires **amc 0.8.29+** (multi-class manifest form).
+Requires **amc 0.8.47+** (cross-package enum variant dispatch).
 
 ## v1 surface — boolean `Changed()`
 
@@ -61,7 +61,7 @@ class Program {
         let w = new FileWatcher("/etc/myapp/config.toml")
         while (true) {
             for ev in w.Poll() {
-                if (ev.KindOf() == WatchEventKind.Modified()) {
+                if (ev.KindOf() == WatchEventKind.Modified) {
                     Console.WriteLine("modified at ms=" +
                                       String_FromInt(ev.TimestampMs()))
                 }
@@ -72,12 +72,12 @@ class Program {
 }
 ```
 
-`WatchEvent` exposes `KindOf() → int`, `PathOf() → string`,
-`RenamedToOf() → string`, `TimestampMs() → int`. `WatchEventKind`
-ships four static-int methods: `Created()` / `Modified()` /
-`Deleted()` / `Renamed()`. Polling backend never emits `Renamed`
-(it surfaces as `Deleted` + `Created`) — the field is reserved
-for the future inotify / FSEvents / RDCW backends.
+`WatchEvent` exposes `KindOf() → WatchEventKind`, `PathOf() → string`,
+`RenamedToOf() → string`, `TimestampMs() → int`. `WatchEventKind` is
+an enum with four variants: `Created`, `Modified`, `Deleted`,
+`Renamed`. Polling backend never emits `Renamed` (it surfaces as
+`Deleted` + `Created`) — the variant is reserved for the future
+inotify / FSEvents / RDCW backends.
 
 ## v2 surface — `DirectoryWatcher`
 
@@ -85,8 +85,9 @@ for the future inotify / FSEvents / RDCW backends.
 let w = new DirectoryWatcher("./src", true)  // recursive
 while (true) {
     for ev in w.Poll() {
-        Console.WriteLine(ev.PathOf() + " — kind " +
-                          String_FromInt(ev.KindOf()))
+        if (ev.KindOf() == WatchEventKind.Created) {
+            Console.WriteLine("created: " + ev.PathOf())
+        }
     }
     // sleep …
 }

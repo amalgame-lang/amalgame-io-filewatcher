@@ -21,7 +21,7 @@ namespace Amalgame.IO.FileWatcher
 //     let w = new FileWatcher("/etc/foo.toml")
 //     while (true) {
 //         for ev in w.Poll() {
-//             if (ev.Kind == WatchEventKind.Modified) { reload() }
+//             if (ev.KindOf() == WatchEventKind.Modified) { reload() }
 //         }
 //         Process_Sleep(500)
 //     }
@@ -181,21 +181,22 @@ namespace Amalgame.IO.FileWatcher
 }
 
 // ── WatchEventKind ────────────────────────────────────
-// 0 = Created, 1 = Modified, 2 = Deleted, 3 = Renamed.
-// Polling backend never emits Renamed (cannot infer); it surfaces
-// as Deleted+Created. Reserved for the inotify/FSEvents/RDCW v0.3.
+// One tag per filesystem state transition. Polling backend never
+// emits Renamed (cannot infer it from mtime/path snapshots — a
+// rename surfaces as Deleted+Created). Reserved for the inotify /
+// FSEvents / RDCW v0.4 backends.
 //
-// Modeled as a class with static int methods rather than an `enum`
-// because amc's cgen doesn't yet dispatch external-package enums
-// through their namespace mangling (the consumer's
-// `WatchEventKind.Created` would lower to a symbol in the
-// consumer's namespace instead of `Amalgame_IO_FileWatcher_*`).
-// Calling style: `ev.KindOf() == WatchEventKind.Created()`.
-public class WatchEventKind {
-    public static int Created()  { return 0 }
-    public static int Modified() { return 1 }
-    public static int Deleted()  { return 2 }
-    public static int Renamed()  { return 3 }
+// v0.3.0: migrated from class-with-static-int-methods to a real
+// enum. The amc cgen bug (cross-package enum variants lowered to
+// the consumer's namespace) was fixed upstream in amc v0.8.47 —
+// see amalgame-lang/Amalgame#535. Bumps `required-amalgame`.
+// Comparison style: `ev.KindOf() == WatchEventKind.Created`
+// (no parens).
+public enum WatchEventKind {
+    Created
+    Modified
+    Deleted
+    Renamed
 }
 
 // ── WatchEvent ────────────────────────────────────────
@@ -204,19 +205,19 @@ public class WatchEventKind {
 // the moment of detection (poll-cycle granularity), not the
 // filesystem mtime.
 public class WatchEvent {
-    private kind:        int
+    private kind:        WatchEventKind
     private path:        string
     private renamedTo:   string
     private timestampMs: int
 
-    public WatchEvent(kind: int, path: string, timestampMs: int) {
+    public WatchEvent(kind: WatchEventKind, path: string, timestampMs: int) {
         this.kind        = kind
         this.path        = path
         this.renamedTo   = ""
         this.timestampMs = timestampMs
     }
 
-    public int            KindOf()      { return this.kind }
+    public WatchEventKind KindOf()      { return this.kind }
     public string         PathOf()      { return this.path }
     public string         RenamedToOf() { return this.renamedTo }
     public int            TimestampMs() { return this.timestampMs }
@@ -274,11 +275,11 @@ public class FileWatcher {
         var cur: int = -1
         @c { cur = (i64) amalgame_fw_mtime(self->path); }
         if (cur != this.lastMtime) {
-            var kind: int = WatchEventKind.Modified()
+            var kind: WatchEventKind = WatchEventKind.Modified
             if (this.lastMtime < 0 && cur >= 0) {
-                kind = WatchEventKind.Created()
+                kind = WatchEventKind.Created
             } else if (this.lastMtime >= 0 && cur < 0) {
-                kind = WatchEventKind.Deleted()
+                kind = WatchEventKind.Deleted
             }
             var nowMs: int = 0
             @c { nowMs = (i64) amalgame_fw_now_ms(); }
@@ -353,11 +354,11 @@ public class DirectoryWatcher {
             let nm: int   = newMtimes.Get(j)
             let oldVal: int = oldIdx.Get(p)
             if (oldVal == 0) {
-                events.Add(new WatchEvent(WatchEventKind.Created(), p, nowMs))
+                events.Add(new WatchEvent(WatchEventKind.Created, p, nowMs))
             } else {
                 let om: int = oldVal - 1
                 if (om != nm) {
-                    events.Add(new WatchEvent(WatchEventKind.Modified(), p, nowMs))
+                    events.Add(new WatchEvent(WatchEventKind.Modified, p, nowMs))
                 }
             }
         }
@@ -365,7 +366,7 @@ public class DirectoryWatcher {
         for i in 0..oldN {
             let p: string = this.paths.Get(i)
             if (newIdx.Get(p) == 0) {
-                events.Add(new WatchEvent(WatchEventKind.Deleted(), p, nowMs))
+                events.Add(new WatchEvent(WatchEventKind.Deleted, p, nowMs))
             }
         }
 
