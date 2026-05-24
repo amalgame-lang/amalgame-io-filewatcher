@@ -68,7 +68,113 @@ public class Program {
             Console.WriteLine("[FAIL] detect-recreate")
         }
 
-        // Cleanup.
+        // Cleanup before the v2 surface tests.
         let _rm2: bool = File.Delete(testPath)
+
+        // ── v2: FileWatcher.Poll() returns typed events ────
+        let v2Path: string = "/tmp/amc_fw_v2_test.txt"
+        if (File.Exists(v2Path)) {
+            let _ = File.Delete(v2Path)
+        }
+        let pw = new FileWatcher(v2Path)
+        // Absent → present yields one Created event.
+        File.WriteAll(v2Path, "alpha")
+        let pe1 = pw.Poll()
+        if (pe1.Count() == 1 && pe1.Get(0).KindOf() == WatchEventKind.Created()) {
+            Console.WriteLine("[PASS] Poll emits Created on appearance")
+        } else {
+            Console.WriteLine("[FAIL] Poll emits Created on appearance")
+        }
+        // Quiescent.
+        let pe2 = pw.Poll()
+        if (pe2.Count() == 0) {
+            Console.WriteLine("[PASS] Poll quiescent")
+        } else {
+            Console.WriteLine("[FAIL] Poll quiescent")
+        }
+        // Present → absent yields Deleted.
+        let _rm3: bool = File.Delete(v2Path)
+        let pe3 = pw.Poll()
+        if (pe3.Count() == 1 && pe3.Get(0).KindOf() == WatchEventKind.Deleted()) {
+            Console.WriteLine("[PASS] Poll emits Deleted on disappearance")
+        } else {
+            Console.WriteLine("[FAIL] Poll emits Deleted on disappearance")
+        }
+        // Path is propagated correctly.
+        if (pe3.Count() == 1 && pe3.Get(0).PathOf() == v2Path) {
+            Console.WriteLine("[PASS] WatchEvent.PathOf")
+        } else {
+            Console.WriteLine("[FAIL] WatchEvent.PathOf")
+        }
+        // TimestampMs is non-zero (clock is set on every Linux build host).
+        if (pe3.Count() == 1 && pe3.Get(0).TimestampMs() > 0) {
+            Console.WriteLine("[PASS] WatchEvent.TimestampMs")
+        } else {
+            Console.WriteLine("[FAIL] WatchEvent.TimestampMs")
+        }
+
+        // ── v2: DirectoryWatcher (non-recursive) ────────────
+        let dwDir: string = "/tmp/amc_dw_v2_test"
+        let _setup = Process.Run("rm -rf '" + dwDir + "' && mkdir -p '" + dwDir + "'")
+        let dw = new DirectoryWatcher(dwDir, false)
+        if (dw.Count() == 0) {
+            Console.WriteLine("[PASS] DirectoryWatcher empty snapshot")
+        } else {
+            Console.WriteLine("[FAIL] DirectoryWatcher empty snapshot, got " + String_FromInt(dw.Count()))
+        }
+        File.WriteAll(dwDir + "/a.txt", "alpha")
+        File.WriteAll(dwDir + "/b.txt", "beta")
+        let dwe1 = dw.Poll()
+        if (dwe1.Count() == 2) {
+            Console.WriteLine("[PASS] DirectoryWatcher detects 2 Created")
+        } else {
+            Console.WriteLine("[FAIL] DirectoryWatcher detects 2 Created, got " + String_FromInt(dwe1.Count()))
+        }
+        var allCreated: bool = true
+        for ev in dwe1 {
+            if (ev.KindOf() != WatchEventKind.Created()) { allCreated = false }
+        }
+        if (allCreated) {
+            Console.WriteLine("[PASS] DirectoryWatcher all events are Created")
+        } else {
+            Console.WriteLine("[FAIL] DirectoryWatcher all events are Created")
+        }
+        // Delete one.
+        let _del1 = File.Delete(dwDir + "/a.txt")
+        let dwe2 = dw.Poll()
+        if (dwe2.Count() == 1 && dwe2.Get(0).KindOf() == WatchEventKind.Deleted()) {
+            Console.WriteLine("[PASS] DirectoryWatcher Deleted event")
+        } else {
+            Console.WriteLine("[FAIL] DirectoryWatcher Deleted event")
+        }
+
+        // ── v2: DirectoryWatcher recursive ──────────────────
+        let rDir: string = "/tmp/amc_dw_v2_rec"
+        let _r1 = Process.Run("rm -rf '" + rDir + "' && mkdir -p '" + rDir + "/sub'")
+        let dwR = new DirectoryWatcher(rDir, true)
+        File.WriteAll(rDir + "/top.txt", "T")
+        File.WriteAll(rDir + "/sub/nested.txt", "N")
+        let rEvs = dwR.Poll()
+        if (rEvs.Count() == 2) {
+            Console.WriteLine("[PASS] DirectoryWatcher recursive sees nested")
+        } else {
+            Console.WriteLine("[FAIL] DirectoryWatcher recursive count " + String_FromInt(rEvs.Count()))
+        }
+
+        // ── v2: DirectoryWatcher non-recursive ignores subdirs ─
+        let nDir: string = "/tmp/amc_dw_v2_nonrec"
+        let _n1 = Process.Run("rm -rf '" + nDir + "' && mkdir -p '" + nDir + "/sub'")
+        let dwN = new DirectoryWatcher(nDir, false)
+        File.WriteAll(nDir + "/top.txt", "T")
+        File.WriteAll(nDir + "/sub/nested.txt", "N")
+        let nEvs = dwN.Poll()
+        if (nEvs.Count() == 1 && nEvs.Get(0).PathOf() == nDir + "/top.txt") {
+            Console.WriteLine("[PASS] DirectoryWatcher non-recursive ignores subdirs")
+        } else {
+            Console.WriteLine("[FAIL] DirectoryWatcher non-recursive ignores subdirs (got " + String_FromInt(nEvs.Count()) + ")")
+        }
+
+        // Cleanup.
+        let _c1 = Process.Run("rm -rf '" + dwDir + "' '" + rDir + "' '" + nDir + "'")
     }
 }
