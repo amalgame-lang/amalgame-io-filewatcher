@@ -25,7 +25,7 @@ amc package add io-filewatcher                  # via the curated index
 amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.2.0
 ```
 
-Requires **amc 0.7.7+**.
+Requires **amc 0.8.29+** (multi-class manifest form).
 
 ## v1 surface — boolean `Changed()`
 

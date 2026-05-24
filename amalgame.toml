@@ -38,7 +38,7 @@ version           = "0.2.0"
 license           = "Apache-2.0"
 description       = "File-watch facade: FileWatcher + DirectoryWatcher with typed WatchEvent, mtime polling."
 authors           = ["Bastien Mouget"]
-required-amalgame = ">=0.7.7"
+required-amalgame = ">=0.8.29"
 schema-version    = 1
 
 [stdlib]
