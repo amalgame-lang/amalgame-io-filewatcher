@@ -258,5 +258,69 @@ public class Program {
             Console.WriteLine("[SKIP] inotify recursive picks up new subdir's file (non-Linux)")
         }
         let _nscleanup = Process.Run("rm -rf '" + nsDir + "'")
+
+        // ── v0.5: rename pairing — IN_MOVED_FROM + IN_MOVED_TO
+        //   sharing a cookie collapse into one Renamed event with
+        //   both paths. Unpaired Moved events fall back to
+        //   Deleted (file left the watched tree) or Created
+        //   (file moved in from outside).
+        let rnDir: string = "/tmp/amc_fw_v05_rename"
+        let _rn = Process.Run("rm -rf '" + rnDir + "' && mkdir -p '" + rnDir + "' && echo a > '" + rnDir + "/a.txt'")
+        let rnW = new DirectoryWatcher(rnDir, false)
+        if (rnW.BackendName() == "inotify") {
+            // Rename within the watched dir.
+            let _mv = Process.Run("sh -c 'mv " + rnDir + "/a.txt " + rnDir + "/b.txt && sleep 0.2'")
+            let rnEvs = rnW.Poll()
+            var sawRename: bool = false
+            for ev in rnEvs {
+                if (ev.KindOf() == WatchEventKind.Renamed
+                    && ev.PathOf() == rnDir + "/a.txt"
+                    && ev.RenamedToOf() == rnDir + "/b.txt") {
+                    sawRename = true
+                }
+            }
+            if (sawRename) {
+                Console.WriteLine("[PASS] rename within watched dir → Renamed event with both paths")
+            } else {
+                Console.WriteLine("[FAIL] rename pairing inside dir, count=" + String_FromInt(rnEvs.Count()))
+            }
+
+            // Move out of watched dir → unpaired MovedFrom → Deleted.
+            let outDir: string = "/tmp/amc_fw_v05_outside"
+            let _mo = Process.Run("rm -rf '" + outDir + "' && mkdir -p '" + outDir + "' && mv " + rnDir + "/b.txt " + outDir + "/b.txt && sleep 0.2")
+            let outEvs = rnW.Poll()
+            var sawDel: bool = false
+            for ev in outEvs {
+                if (ev.KindOf() == WatchEventKind.Deleted && ev.PathOf() == rnDir + "/b.txt") {
+                    sawDel = true
+                }
+            }
+            if (sawDel) {
+                Console.WriteLine("[PASS] move out of watched dir → Deleted")
+            } else {
+                Console.WriteLine("[FAIL] move out → Deleted, count=" + String_FromInt(outEvs.Count()))
+            }
+
+            // Move in from outside → unpaired MovedTo → Created.
+            let _mi = Process.Run("sh -c 'mv " + outDir + "/b.txt " + rnDir + "/b.txt && sleep 0.2'")
+            let inEvs = rnW.Poll()
+            var sawCre: bool = false
+            for ev in inEvs {
+                if (ev.KindOf() == WatchEventKind.Created && ev.PathOf() == rnDir + "/b.txt") {
+                    sawCre = true
+                }
+            }
+            if (sawCre) {
+                Console.WriteLine("[PASS] move into watched dir → Created")
+            } else {
+                Console.WriteLine("[FAIL] move in → Created, count=" + String_FromInt(inEvs.Count()))
+            }
+            let _outclean = Process.Run("rm -rf '" + outDir + "'")
+        } else {
+            Console.WriteLine("[SKIP] rename within watched dir → Renamed event with both paths (non-Linux)")
+            Console.WriteLine("[SKIP] move out of watched dir → Deleted (non-Linux)")
+            Console.WriteLine("[SKIP] move into watched dir → Created (non-Linux)")
+        }
+        let _rncleanup = Process.Run("rm -rf '" + rnDir + "'")
     }
 }

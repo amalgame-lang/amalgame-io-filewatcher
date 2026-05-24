@@ -34,7 +34,7 @@ package as part of the framework split (post-v0.7.5).
 
 ```bash
 amc package add io-filewatcher                  # via the curated index
-amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.4.0
+amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.5.0
 ```
 
 Requires **amc 0.8.47+** (cross-package enum variant dispatch).
@@ -88,10 +88,14 @@ class Program {
 `WatchEvent` exposes `KindOf() → WatchEventKind`, `PathOf() →
 string`, `RenamedToOf() → string`, `TimestampMs() → int`.
 `WatchEventKind` is an enum with four variants: `Created`,
-`Modified`, `Deleted`, `Renamed`. Polling and v0.4 inotify backends
-never emit `Renamed` (it surfaces as `Deleted` + `Created`) — the
-variant is reserved for v0.5's `IN_MOVED_FROM`/`IN_MOVED_TO`
-cookie pairing.
+`Modified`, `Deleted`, `Renamed`. Since v0.5.0 the inotify backend
+emits `Renamed` when `IN_MOVED_FROM` and `IN_MOVED_TO` share a
+cookie inside the watched tree — the event's `PathOf()` is the
+old path, `RenamedToOf()` is the new one. Unpaired moves fall
+back to `Deleted` (escaped the watched tree) or `Created` (moved
+in from outside). The polling backend still surfaces renames as
+`Deleted` + `Created` since the diff has no way to correlate the
+two paths.
 
 ## v2 surface — `DirectoryWatcher`
 
@@ -137,11 +141,13 @@ mechanism.
 ./tests/run_tests.sh /path/to/amc
 ```
 
-22 cases: 7 v1 (`Exists`/`Changed`/`GetPath`) + 11 v2 (Poll
+25 cases: 7 v1 (`Exists`/`Changed`/`GetPath`) + 11 v2 (Poll
 events, DirectoryWatcher empty/Created/Deleted/recursive/
 non-recursive) + 4 v0.4 inotify-specific (backend probe,
-real-time Modify, atomic-rename, recursive new-subdir pickup).
-The v0.4 cases SKIP cleanly on non-Linux hosts.
+real-time Modify, atomic-rename, recursive new-subdir pickup)
++ 3 v0.5 rename-pairing (within-dir Renamed, move-out Deleted,
+move-in Created). The v0.4 and v0.5 cases SKIP cleanly on
+non-Linux hosts.
 
 ## Roadmap
 
@@ -149,11 +155,13 @@ The v0.4 cases SKIP cleanly on non-Linux hosts.
   `DirectoryWatcher` (polling backend).
 - **v0.3** — `WatchEventKind` migrated from class-with-statics
   to a real `enum` (requires amc 0.8.47+).
-- **v0.4 (this release)** — **inotify backend on Linux**:
-  reactive watches, recursive subtree expansion, atomic-rename
-  recovery. Polling stays the fallback.
-- **v0.5** — rename pairing (`IN_MOVED_FROM`/`IN_MOVED_TO`
-  cookies) → emit `Renamed` instead of `Deleted` + `Created`.
+- **v0.4** — inotify backend on Linux: reactive watches,
+  recursive subtree expansion, atomic-rename recovery. Polling
+  stays the fallback.
+- **v0.5 (this release)** — **rename pairing**: `IN_MOVED_FROM`
+  + `IN_MOVED_TO` events sharing a cookie collapse into one
+  `Renamed` event with both paths. Unpaired moves fall back
+  to `Deleted` / `Created`.
 - **v0.6** — `FSEvents` (macOS), `ReadDirectoryChangesW`
   (Windows). Polling stays the fallback when inotify-equivalent
   isn't available.

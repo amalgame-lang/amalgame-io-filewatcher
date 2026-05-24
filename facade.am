@@ -180,22 +180,26 @@ namespace Amalgame.IO.FileWatcher
      *   2. Build the full event path = parent + "/" + event.name
      *      (or just parent if name is empty — IN_DELETE_SELF /
      *      IN_MOVE_SELF on the watched node itself).
-     *   3. Map the mask to a kind code (0=Created, 1=Modified,
-     *      2=Deleted, 3=Renamed). Renamed is never emitted by this
-     *      MVP (IN_MOVED_FROM/TO surface as Deleted+Created); the
-     *      cookie-pairing pass is reserved for v0.5.
-     *   4. Append (path, kind, is_dir, wd) to the four out-lists.
-     *      The caller uses `is_dir` to know whether to add a new
-     *      watch on a Created-dir event (recursive mode). The
-     *      `wd` is included so the caller can drop wd→path
-     *      entries on IN_DELETE_SELF / IN_IGNORED. */
+     *   3. Map the mask to a kind code:
+     *        0 = Created   (IN_CREATE)
+     *        1 = Modified  (IN_MODIFY)
+     *        2 = Deleted   (IN_DELETE / IN_DELETE_SELF / IN_MOVE_SELF)
+     *        3 = MovedFrom (IN_MOVED_FROM)   — pair via cookie
+     *        4 = MovedTo   (IN_MOVED_TO)     — pair via cookie
+     *       -1 = sentinel  (drop wd from caller's wd_list)
+     *      The caller pairs MovedFrom + MovedTo by cookie to emit
+     *      Renamed events (v0.5). Unpaired Moved* events fall back
+     *      to Deleted / Created semantics.
+     *   4. Append (path, kind, is_dir, wd, cookie) to the five
+     *      out-lists. `cookie` is 0 for non-Moved events. */
     static void amalgame_fw_inotify_drain(int fd,
                                           AmalgameList* wd_list,
                                           AmalgameList* parent_list,
                                           AmalgameList* events_paths,
                                           AmalgameList* events_kinds,
                                           AmalgameList* events_is_dir,
-                                          AmalgameList* events_wds) {
+                                          AmalgameList* events_wds,
+                                          AmalgameList* events_cookies) {
 #ifdef __linux__
         if (fd < 0) return;
         char buf[8192];
@@ -237,36 +241,39 @@ namespace Amalgame.IO.FileWatcher
 
                     int emit = 1;
                     int kind = 1; /* Modified */
-                    if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
+                    if (ev->mask & IN_MOVED_FROM) {
+                        kind = 3; /* MovedFrom — provisional */
+                    } else if (ev->mask & IN_MOVED_TO) {
+                        kind = 4; /* MovedTo — provisional */
+                    } else if (ev->mask & IN_CREATE) {
                         kind = 0; /* Created */
                     } else if (ev->mask & IN_MODIFY) {
                         kind = 1; /* Modified */
-                    } else if (ev->mask & (IN_DELETE | IN_DELETE_SELF |
-                                           IN_MOVED_FROM | IN_MOVE_SELF)) {
+                    } else if (ev->mask & (IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF)) {
                         kind = 2; /* Deleted */
                     } else if (ev->mask & IN_IGNORED) {
-                        /* Watch was implicitly removed (e.g. dir
-                         * containing it deleted). Surface as wd
-                         * removal — caller drops the entry. */
+                        /* Watch was implicitly removed. Surface as
+                         * wd removal via the sentinel below. */
                         emit = 0;
                     } else {
                         emit = 0;
                     }
                     if (emit) {
                         int is_dir = (ev->mask & IN_ISDIR) ? 1 : 0;
-                        AmalgameList_add(events_paths, (void*) full);
-                        AmalgameList_add(events_kinds, (void*) (intptr_t) kind);
-                        AmalgameList_add(events_is_dir, (void*) (intptr_t) is_dir);
-                        AmalgameList_add(events_wds, (void*) (intptr_t) ev->wd);
+                        AmalgameList_add(events_paths,   (void*) full);
+                        AmalgameList_add(events_kinds,   (void*) (intptr_t) kind);
+                        AmalgameList_add(events_is_dir,  (void*) (intptr_t) is_dir);
+                        AmalgameList_add(events_wds,     (void*) (intptr_t) ev->wd);
+                        AmalgameList_add(events_cookies, (void*) (intptr_t) ev->cookie);
                     }
                     /* Always notify caller when a watch is being
                      * dropped, so it can clean its wd_list. */
                     if (ev->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) {
-                        /* Sentinel: kind = -1 means "drop wd". */
-                        AmalgameList_add(events_paths, (void*) full);
-                        AmalgameList_add(events_kinds, (void*) (intptr_t) -1);
-                        AmalgameList_add(events_is_dir, (void*) (intptr_t) 0);
-                        AmalgameList_add(events_wds, (void*) (intptr_t) ev->wd);
+                        AmalgameList_add(events_paths,   (void*) full);
+                        AmalgameList_add(events_kinds,   (void*) (intptr_t) -1);
+                        AmalgameList_add(events_is_dir,  (void*) (intptr_t) 0);
+                        AmalgameList_add(events_wds,     (void*) (intptr_t) ev->wd);
+                        AmalgameList_add(events_cookies, (void*) (intptr_t) 0);
                     }
                 }
                 off += sizeof(struct inotify_event) + ev->len;
@@ -276,6 +283,7 @@ namespace Amalgame.IO.FileWatcher
         (void) fd; (void) wd_list; (void) parent_list;
         (void) events_paths; (void) events_kinds;
         (void) events_is_dir; (void) events_wds;
+        (void) events_cookies;
 #endif
     }
 
@@ -560,12 +568,13 @@ public class FileWatcher {
             wdList.Add(this.inotifyWd)
             parentList.Add(this.path)
         }
-        let outPaths: List<string> = new List<string>()
-        let outKinds: List<int>    = new List<int>()
-        let outIsDir: List<int>    = new List<int>()
-        let outWds:   List<int>    = new List<int>()
+        let outPaths:   List<string> = new List<string>()
+        let outKinds:   List<int>    = new List<int>()
+        let outIsDir:   List<int>    = new List<int>()
+        let outWds:     List<int>    = new List<int>()
+        let outCookies: List<int>    = new List<int>()
         @c { amalgame_fw_inotify_drain(self->inotifyFd, wdList, parentList,
-                                       outPaths, outKinds, outIsDir, outWds); }
+                                       outPaths, outKinds, outIsDir, outWds, outCookies); }
         var nowMs: int = 0
         @c { nowMs = (i64) amalgame_fw_now_ms(); }
         var watchGone: bool = false
@@ -580,9 +589,13 @@ public class FileWatcher {
                 watchGone = true
                 continue
             }
+            // FileWatcher only watches one inode → no cookie
+            // pairing possible. Treat MovedFrom (k=3) as Deleted
+            // and MovedTo (k=4) as Created — same semantics as
+            // the single-file polling backend.
             var kind: WatchEventKind = WatchEventKind.Modified
-            if (k == 0)      { kind = WatchEventKind.Created }
-            else if (k == 2) { kind = WatchEventKind.Deleted }
+            if (k == 0 || k == 4)      { kind = WatchEventKind.Created }
+            else if (k == 2 || k == 3) { kind = WatchEventKind.Deleted }
             events.Add(new WatchEvent(kind, this.path, nowMs))
         }
         if (watchGone) {
@@ -725,39 +738,54 @@ public class DirectoryWatcher {
 
     private List<WatchEvent> PollInotify() {
         let events: List<WatchEvent> = new List<WatchEvent>()
-        let outPaths: List<string> = new List<string>()
-        let outKinds: List<int>    = new List<int>()
-        let outIsDir: List<int>    = new List<int>()
-        let outWds:   List<int>    = new List<int>()
+        let outPaths:   List<string> = new List<string>()
+        let outKinds:   List<int>    = new List<int>()
+        let outIsDir:   List<int>    = new List<int>()
+        let outWds:     List<int>    = new List<int>()
+        let outCookies: List<int>    = new List<int>()
         @c { amalgame_fw_inotify_drain(self->inotifyFd, self->wds, self->watchDirs,
-                                       outPaths, outKinds, outIsDir, outWds); }
+                                       outPaths, outKinds, outIsDir, outWds, outCookies); }
         var nowMs: int = 0
         @c { nowMs = (i64) amalgame_fw_now_ms(); }
         let n: int = outPaths.Count()
 
-        // Pass 1 — collect "Created" paths into a set. Used in
-        // pass 2 to suppress the Modified follow-up that
-        // `WriteAll` (open(O_CREAT) + write) naturally triggers
-        // on a directory watch with `IN_MODIFY` in the mask.
-        // Without the dedupe, a single `WriteAll` produces two
-        // events (Created + Modified) and breaks the "one event
-        // per file appearance" intuition that matches the
-        // polling backend.
-        let createdSet: Map<string,int> = new Map<string,int>()
+        // ── Pass 1 — collect Created paths (for the
+        // Created+Modified dedupe) and pair MovedFrom/MovedTo
+        // by cookie. Cookies are non-zero unique per rename;
+        // the kernel guarantees the FROM and TO events show up
+        // in the same `read(2)` batch (or close enough that
+        // they land in the same Poll() drain). Unpaired Moved
+        // events fall back to Deleted / Created semantics
+        // (file moved into / out of the watched tree).
+        let createdSet:  Map<string,int>    = new Map<string,int>()
+        let cookieFrom:  Map<string,string> = new Map<string,string>()  // cookie → from-path
+        let cookieTo:    Map<string,string> = new Map<string,string>()  // cookie → to-path
         for i in 0..n {
             let k: int = outKinds.Get(i)
             let p: string = outPaths.Get(i)
+            let c: int = outCookies.Get(i)
             if (k == 0) {
                 createdSet.Set(p, 1)
+            } else if (k == 3 && c != 0) {
+                cookieFrom.Set(String_FromInt(c), p)
+            } else if (k == 4 && c != 0) {
+                cookieTo.Set(String_FromInt(c), p)
             }
         }
-        // Pass 2 — emit events + handle sentinels + grow watches
-        // on new-subdir creation (recursive mode).
+
+        // Mark cookies that were paired so pass 2 emits one
+        // Renamed event (on the FROM side, with RenamedTo = TO)
+        // and skips the standalone MovedTo.
+        let pairedCookies: Map<string,int> = new Map<string,int>()
+
+        // ── Pass 2 — emit events + handle sentinels + grow
+        // watches on new-subdir creation (recursive mode).
         for i in 0..n {
             let k: int = outKinds.Get(i)
             let p: string = outPaths.Get(i)
             let isDir: bool = (outIsDir.Get(i) == 1)
             let wd: int = outWds.Get(i)
+            let cookie: int = outCookies.Get(i)
             if (k == -1) {
                 this.DropWatch(wd)
                 continue
@@ -765,6 +793,51 @@ public class DirectoryWatcher {
             // Dedupe: skip Modified if a Created event for the
             // same path also rode in the batch.
             if (k == 1 && createdSet.Get(p) == 1) {
+                continue
+            }
+            // Rename pairing — when MovedFrom + MovedTo share a
+            // cookie, emit ONE Renamed event from the FROM slot
+            // and mark the cookie so the standalone MovedTo is
+            // skipped below.
+            if (k == 3 && cookie != 0) {
+                let ckey: string = String_FromInt(cookie)
+                let toPath: string = cookieTo.Get(ckey)
+                if (String_Length(toPath) > 0) {
+                    let ev: WatchEvent = new WatchEvent(WatchEventKind.Renamed, p, nowMs)
+                    ev.SetRenamedTo(toPath)
+                    events.Add(ev)
+                    pairedCookies.Set(ckey, 1)
+                    continue
+                }
+                // Unpaired MovedFrom — emit Deleted (file
+                // escaped the watched tree).
+                events.Add(new WatchEvent(WatchEventKind.Deleted, p, nowMs))
+                continue
+            }
+            if (k == 4 && cookie != 0) {
+                let ckey: string = String_FromInt(cookie)
+                if (pairedCookies.Get(ckey) == 1) {
+                    // Already emitted as Renamed via the FROM
+                    // slot — still need to grow watches if it's
+                    // a recursive subdir move-in.
+                    if (this.recursive && isDir) {
+                        this.AddSubtreeWatches(p)
+                    }
+                    continue
+                }
+                // Unpaired MovedTo — emit Created (file moved
+                // INTO the watched tree from outside).
+                events.Add(new WatchEvent(WatchEventKind.Created, p, nowMs))
+                if (this.recursive && isDir) {
+                    this.AddSubtreeWatches(p)
+                    let files:  List<string> = new List<string>()
+                    let mtimes: List<int>    = new List<int>()
+                    @c { amalgame_fw_walk(p, 1, files, mtimes); }
+                    let fn: int = files.Count()
+                    for fi in 0..fn {
+                        events.Add(new WatchEvent(WatchEventKind.Created, files.Get(fi), nowMs))
+                    }
+                }
                 continue
             }
             var kind: WatchEventKind = WatchEventKind.Modified
