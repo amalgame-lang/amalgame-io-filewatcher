@@ -16,9 +16,11 @@
 #   WatchEventKind  — Created / Modified / Deleted / Renamed
 #                     (real enum since v0.3.0 — was a class with
 #                     static int methods in v0.2.x as an amc-cgen
-#                     workaround; polling backend never emits
-#                     Renamed — reserved for the v0.5 native
-#                     rename-pairing pass)
+#                     workaround; Renamed emitted by the inotify
+#                     backend via IN_MOVED_FROM/IN_MOVED_TO cookie
+#                     pairing since v0.5.0; polling backend still
+#                     surfaces renames as Deleted+Created since the
+#                     diff has no way to correlate the two paths)
 #
 # Backend selection (v0.4):
 #   - On Linux, `inotify_init1` is tried first. Watches install on
@@ -36,22 +38,20 @@
 # in amc's src/stdlib/io_filewatcher.am; extracted into this
 # external package as part of the framework split.
 #
-# Out of scope (v0.5+):
+# Out of scope (v0.6+):
 #   - FSEvents on macOS, ReadDirectoryChangesW on Windows
-#     (polling fallback covers these today)
-#   - Rename pairing via IN_MOVED_FROM/IN_MOVED_TO cookies
-#     (currently surfaces as Deleted + Created)
+#     (polling fallback covers these today; native = reactive)
 #
 # Installation:
 #
 #   amc package add io-filewatcher                  # via curated index
-#   amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.4.0
+#   amc package add github.com/amalgame-lang/amalgame-io-filewatcher@v0.5.0
 
 [package]
 name              = "amalgame-io-filewatcher"
-version           = "0.4.0"
+version           = "0.5.0"
 license           = "Apache-2.0"
-description       = "File-watch facade with inotify (Linux) + polling backend, typed WatchEvent records, FileWatcher + DirectoryWatcher."
+description       = "File-watch facade with inotify (Linux) + polling backend, typed WatchEvent records (incl. Renamed via cookie pairing), FileWatcher + DirectoryWatcher."
 authors           = ["Bastien Mouget"]
 required-amalgame = ">=0.8.47"
 schema-version    = 1

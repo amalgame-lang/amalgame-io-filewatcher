@@ -142,6 +142,12 @@ run_test "inotify reactive Modify"      "PASS] inotify detects Modify in real ti
 run_test "inotify atomic-rename"        "PASS] inotify atomic-rename recovery (Delete+Create)"
 run_test "inotify recursive new subdir" "PASS] inotify recursive picks up new subdir's file"
 
+echo ""
+echo "── Amalgame.IO.FileWatcher v0.5 (rename pairing) ─"
+run_test "rename within dir → Renamed"  "PASS] rename within watched dir → Renamed event with both paths"
+run_test "move out → Deleted"           "PASS] move out of watched dir → Deleted"
+run_test "move in → Created"            "PASS] move into watched dir → Created"
+
 rm -f "$WORK_BUILD_DIR"
 echo ""
 echo "────────────────────────────────────────────"
