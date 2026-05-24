@@ -135,6 +135,13 @@ run_test "DirectoryWatcher Deleted"     "[PASS] DirectoryWatcher Deleted event"
 run_test "DirectoryWatcher recursive"   "[PASS] DirectoryWatcher recursive sees nested"
 run_test "DirectoryWatcher non-recurs"  "[PASS] DirectoryWatcher non-recursive ignores subdirs"
 
+echo ""
+echo "── Amalgame.IO.FileWatcher v0.4 (inotify) ─"
+run_test "BackendName probe"            "[PASS] FileWatcher.BackendName returns inotify or polling"
+run_test "inotify reactive Modify"      "PASS] inotify detects Modify in real time"
+run_test "inotify atomic-rename"        "PASS] inotify atomic-rename recovery (Delete+Create)"
+run_test "inotify recursive new subdir" "PASS] inotify recursive picks up new subdir's file"
+
 rm -f "$WORK_BUILD_DIR"
 echo ""
 echo "────────────────────────────────────────────"
